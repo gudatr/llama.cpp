@@ -34,18 +34,19 @@ foreach(asset ${PUBLIC_ASSETS})
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${input}" "-DOUTPUT=${output}" -P "${PROJECT_SOURCE_DIR}/scripts/xxd.cmake"
     )
 endforeach()
-add_executable(${TARGET} ${TARGET_SRCS})
+add_library(${TARGET} SHARED ${TARGET_SRCS})
 install(TARGETS ${TARGET} RUNTIME)
-target_compile_definitions(${TARGET} PRIVATE
+target_compile_definitions(${TARGET} PUBLIC
     SERVER_VERBOSE=$<BOOL:${LLAMA_SERVER_VERBOSE}>
 )
-target_link_libraries(${TARGET} PRIVATE common ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PUBLIC common ${CMAKE_THREAD_LIBS_INIT})
 if (LLAMA_SERVER_SSL)
     find_package(OpenSSL REQUIRED)
-    target_link_libraries(${TARGET} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    target_compile_definitions(${TARGET} PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+    target_link_libraries(${TARGET} PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(${TARGET} PUBLIC CPPHTTPLIB_OPENSSL_SUPPORT)
 endif()
 if (WIN32)
-    TARGET_LINK_LIBRARIES(${TARGET} PRIVATE ws2_32)
+    TARGET_LINK_LIBRARIES(${TARGET} PUBLIC ws2_32)
 endif()
-target_compile_features(${TARGET} PRIVATE cxx_std_11)
+target_compile_features(${TARGET} PUBLIC cxx_std_11)
+
