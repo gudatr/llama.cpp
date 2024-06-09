@@ -1327,10 +1327,9 @@ struct server_context
         res.error = false;
         res.stop = false;
         res.data = json{
-            {"content", tkn.text_to_send},
-            {"stop", false},
-            {"id_slot", slot.id},
-            {"multimodal", false}};
+            {"d", tkn.text_to_send},
+            {"s", false},
+        };
 
         if (slot.sparams.n_probs > 0)
         {
