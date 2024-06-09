@@ -1328,7 +1328,6 @@ struct server_context
         res.stop = false;
         res.data = json{
             {"d", tkn.text_to_send},
-            {"s", false},
         };
 
         if (slot.sparams.n_probs > 0)
@@ -1366,21 +1365,8 @@ struct server_context
         res.error = false;
         res.stop = true;
         res.data = json{
-            {"content", !slot.params.stream ? slot.generated_text : ""},
-            {"id_slot", slot.id},
-            {"stop", true},
-            {"model", params.model_alias},
-            {"tokens_predicted", slot.n_decoded},
-            {"tokens_evaluated", slot.n_prompt_tokens},
-            {"generation_settings", get_formated_generation(slot)},
-            {"prompt", slot.prompt},
-            {"truncated", slot.truncated},
-            {"stopped_eos", slot.stopped_eos},
-            {"stopped_word", slot.stopped_word},
-            {"stopped_limit", slot.stopped_limit},
-            {"stopping_word", slot.stopping_word},
-            {"tokens_cached", slot.n_past},
-            {"timings", slot.get_formated_timings()}};
+            {"c", !slot.params.stream ? slot.generated_text : ""},
+            {"stop", true}};
 
         if (slot.sparams.n_probs > 0)
         {
