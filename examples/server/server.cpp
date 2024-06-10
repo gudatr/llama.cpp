@@ -16,6 +16,14 @@
 #define JSON_ASSERT GGML_ASSERT
 #include "json.hpp"
 
+#if defined(_MSC_VER)
+#define LIB_API __declspec(dllexport) // Microsoft
+#elif defined(__GNUC__)
+#define LIB_API extern "C" __attribute__((visibility("default"))) // GCC
+#else
+#define LIB_API
+#endif
+
 // auto generated files (update with ./deps.sh)
 #include "colorthemes.css.hpp"
 #include "style.css.hpp"
@@ -107,6 +115,8 @@ struct server_task_result
     bool stop;
     bool error;
 };
+
+int loops = 0;
 
 struct server_task_multi
 {
@@ -466,62 +476,8 @@ struct server_queue
 
         while (true)
         {
-            LOG_VERBOSE("new task may arrive", {});
-
-            while (true)
-            {
-                std::unique_lock<std::mutex> lock(mutex_tasks);
-                if (queue_tasks.empty())
-                {
-                    lock.unlock();
-                    break;
-                }
-                server_task task = queue_tasks.front();
-                queue_tasks.erase(queue_tasks.begin());
-                lock.unlock();
-                LOG_VERBOSE("callback_new_task", {{"id_task", task.id}});
-                callback_new_task(task);
-            }
-
-            LOG_VERBOSE("update_multitasks", {});
-
-            // check if we have any finished multitasks
-            auto queue_iterator = queue_multitasks.begin();
-            while (queue_iterator != queue_multitasks.end())
-            {
-                if (queue_iterator->subtasks_remaining.empty())
-                {
-                    // all subtasks done == multitask is done
-                    server_task_multi current_multitask = *queue_iterator;
-                    callback_finish_multitask(current_multitask);
-                    // remove this multitask
-                    queue_iterator = queue_multitasks.erase(queue_iterator);
-                }
-                else
-                {
-                    ++queue_iterator;
-                }
-            }
-
-            // all tasks in the current loop is processed, slots data is now ready
-            LOG_VERBOSE("callback_update_slots", {});
-
+            loops += 1;
             callback_update_slots();
-
-            LOG_VERBOSE("wait for new task", {});
-            {
-                std::unique_lock<std::mutex> lock(mutex_tasks);
-                if (queue_tasks.empty())
-                {
-                    if (!running)
-                    {
-                        LOG_VERBOSE("ending start_loop", {});
-                        return;
-                    }
-                    condition_tasks.wait(lock, [&]
-                                         { return (!queue_tasks.empty() || !running); });
-                }
-            }
         }
     }
 
@@ -823,22 +779,23 @@ struct server_context
         return last_used;
     }
 
+    std::string tkns[2048];
+
+    int tkns_length = 2048;
+
+    int tkns_pos = 0;
+
+    int tkns_start = 0;
+
+    bool active = false;
+
     bool launch_slot_with_task(server_slot &slot, const server_task &task)
     {
         slot_params default_params;
         llama_sampling_params default_sparams;
         auto &data = task.data;
-
-        if (data.count("__oaicompat") != 0)
-        {
-            slot.oaicompat = true;
-            slot.oaicompat_model = json_value(data, "model", std::string(DEFAULT_OAICOMPAT_MODEL));
-        }
-        else
-        {
-            slot.oaicompat = false;
-            slot.oaicompat_model = "";
-        }
+        tkns_start = tkns_pos;
+        active = true;
 
         slot.params.stream = json_value(data, "stream", false);
         slot.params.cache_prompt = json_value(data, "cache_prompt", false);
@@ -1321,82 +1278,13 @@ struct server_context
 
     void send_partial_response(server_slot &slot, completion_token_output tkn)
     {
-        server_task_result res;
-        res.id = slot.id_task;
-        res.id_multi = slot.id_multi;
-        res.error = false;
-        res.stop = false;
-        res.data = json{
-            {"d", tkn.text_to_send},
-        };
-
-        if (slot.sparams.n_probs > 0)
-        {
-            const std::vector<llama_token> to_send_toks = llama_tokenize(ctx, tkn.text_to_send, false);
-            const size_t probs_pos = std::min(slot.n_sent_token_probs, slot.generated_token_probs.size());
-            const size_t probs_stop_pos = std::min(slot.n_sent_token_probs + to_send_toks.size(), slot.generated_token_probs.size());
-
-            std::vector<completion_token_output> probs_output;
-            if (probs_pos < probs_stop_pos)
-            {
-                probs_output = std::vector<completion_token_output>(
-                    slot.generated_token_probs.begin() + probs_pos,
-                    slot.generated_token_probs.begin() + probs_stop_pos);
-            }
-            slot.n_sent_token_probs = probs_stop_pos;
-
-            res.data["completion_probabilities"] = probs_vector_to_json(ctx, probs_output);
-        }
-
-        if (slot.oaicompat)
-        {
-            res.data["oaicompat_token_ctr"] = slot.n_decoded;
-            res.data["model"] = slot.oaicompat_model;
-        }
-
-        queue_results.send(res);
+        tkns[tkns_pos] = tkn.text_to_send;
+        tkns_pos = (tkns_pos + 1) % tkns_length;
     }
 
     void send_final_response(const server_slot &slot)
     {
-        server_task_result res;
-        res.id = slot.id_task;
-        res.id_multi = slot.id_multi;
-        res.error = false;
-        res.stop = true;
-        res.data = json{
-            {"c", !slot.params.stream ? slot.generated_text : ""},
-            {"stop", true}};
-
-        if (slot.sparams.n_probs > 0)
-        {
-            std::vector<completion_token_output> probs;
-            if (!slot.params.stream && slot.stopped_word)
-            {
-                const std::vector<llama_token> stop_word_toks = llama_tokenize(ctx, slot.stopping_word, false);
-
-                size_t safe_offset = std::min(slot.generated_token_probs.size(), stop_word_toks.size());
-                probs = std::vector<completion_token_output>(
-                    slot.generated_token_probs.begin(),
-                    slot.generated_token_probs.end() - safe_offset);
-            }
-            else
-            {
-                probs = std::vector<completion_token_output>(
-                    slot.generated_token_probs.begin(),
-                    slot.generated_token_probs.end());
-            }
-
-            res.data["completion_probabilities"] = probs_vector_to_json(ctx, probs);
-        }
-
-        if (slot.oaicompat)
-        {
-            res.data["oaicompat_token_ctr"] = slot.n_decoded;
-            res.data["model"] = slot.oaicompat_model;
-        }
-
-        queue_results.send(res);
+        active = false;
     }
 
     void send_embedding(const server_slot &slot, const llama_batch &batch)
@@ -2207,15 +2095,6 @@ struct server_context
                     continue; // continue loop of slots
                 }
 
-                // prompt evaluated for embedding
-                if (slot.embedding)
-                {
-                    send_embedding(slot, batch_view);
-                    slot.release();
-                    slot.i_batch = -1;
-                    continue; // continue loop of slots
-                }
-
                 completion_token_output result;
                 const llama_token id = llama_sampling_sample(slot.ctx_sampling, ctx, NULL, slot.i_batch - i);
 
@@ -2276,19 +2155,84 @@ struct server_context
 
         LOG_VERBOSE("run slots completed", {});
     }
-
-    json model_meta() const
-    {
-        return json{
-            {"vocab_type", llama_vocab_type(model)},
-            {"n_vocab", llama_n_vocab(model)},
-            {"n_ctx_train", llama_n_ctx_train(model)},
-            {"n_embd", llama_n_embd(model)},
-            {"n_params", llama_model_n_params(model)},
-            {"size", llama_model_size(model)},
-        };
-    }
 };
+
+// struct that contains llama context and inference
+server_context ctx_server;
+
+LIB_API int LLAMA_CheckLoops()
+{
+    return loops;
+}
+
+LIB_API char *LLAMA_GetData(uint32_t &dataSize)
+{
+    std::stringstream ss;
+    int end = ctx_server.tkns_pos;
+    while (ctx_server.tkns_start != end)
+    {
+        ss << ctx_server.tkns[ctx_server.tkns_start];
+        ctx_server.tkns_start = (ctx_server.tkns_start + 1) % ctx_server.tkns_length;
+    }
+
+    auto str = ss.str();
+    auto strdata = str.data();
+
+    dataSize = str.length();
+
+    char *memcpydata;
+    memcpydata = (char *)malloc(dataSize);
+    memcpy(memcpydata, (const char *)strdata, dataSize);
+
+    return memcpydata;
+}
+
+LIB_API void LLAMA_DiscardData(char *data)
+{
+    free(data);
+}
+
+LIB_API bool LLAMA_IsActive()
+{
+    return ctx_server.active || ctx_server.tkns_start != ctx_server.tkns_pos;
+}
+
+LIB_API bool LLAMA_Prompt(const char *text)
+{
+    if (ctx_server.active)
+        return false;
+
+    try
+    {
+        auto data = json::parse(text);
+
+        server_slot *slot = ctx_server.get_slot(0);
+
+        server_task task;
+        task.id = 0;
+        task.id_multi = 0;
+        task.id_target = 0;
+        task.data = std::move(data);
+        task.infill = false;
+        task.embedding = false;
+        task.type = SERVER_TASK_TYPE_COMPLETION;
+
+        slot->reset();
+
+        slot->id_task = task.id;
+        slot->id_multi = task.id_multi;
+        slot->infill = task.infill;
+        slot->embedding = task.embedding;
+
+        ctx_server.launch_slot_with_task(*slot, task);
+    }
+    catch (...)
+    {
+        return false;
+    }
+
+    return true;
+}
 
 static void log_server_request(const httplib::Request &req, const httplib::Response &res)
 {
@@ -2327,19 +2271,6 @@ inline void signal_handler(int signal)
     }
 
     shutdown_handler(signal);
-}
-
-#if defined(_MSC_VER)
-#define LIB_API __declspec(dllexport) // Microsoft
-#elif defined(__GNUC__)
-#define LIB_API extern "C" __attribute__((visibility("default"))) // GCC
-#else
-#define LIB_API
-#endif
-
-LIB_API int sus()
-{
-    return 1234567890;
 }
 
 LIB_API int main(int argc, char **argv)
@@ -2446,11 +2377,11 @@ LIB_API int main(int argc, char **argv)
     svr->set_read_timeout(params.timeout_read);
     svr->set_write_timeout(params.timeout_write);
 
-    if (!svr->bind_to_port(params.hostname, params.port))
-    {
-        fprintf(stderr, "\ncouldn't bind to server socket: hostname=%s port=%d\n\n", params.hostname.c_str(), params.port);
-        return 69;
-    }
+    /*if (!svr->bind_to_port(params.hostname, params.port))
+     {
+         fprintf(stderr, "\ncouldn't bind to server socket: hostname=%s port=%d\n\n", params.hostname.c_str(), params.port);
+         return 69;
+     }*/
 
     std::unordered_map<std::string, std::string> log_data;
 
@@ -2467,9 +2398,6 @@ LIB_API int main(int argc, char **argv)
         log_data["api_key"] = "api_key: " + std::to_string(params.api_keys.size()) + " keys loaded";
     }
 
-    // struct that contains llama context and inference
-    server_context ctx_server;
-
     // load the model
     if (!ctx_server.load_model(params))
     {
@@ -2484,7 +2412,6 @@ LIB_API int main(int argc, char **argv)
 
     LOG_INFO("model loaded", {});
 
-    const auto model_meta = ctx_server.model_meta();
     // print sample chat example to make it clear which template is used
     {
         json chat;
@@ -2501,7 +2428,7 @@ LIB_API int main(int argc, char **argv)
                                   });
     }
 
-    const auto handle_completions = [&ctx_server, &res_error](const httplib::Request &req, httplib::Response &res)
+    const auto handle_completions = [&res_error](const httplib::Request &req, httplib::Response &res)
     {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
 
@@ -2528,7 +2455,7 @@ LIB_API int main(int argc, char **argv)
         }
         else
         {
-            const auto chunked_content_provider = [id_task, &ctx_server](size_t, httplib::DataSink &sink)
+            const auto chunked_content_provider = [id_task](size_t, httplib::DataSink &sink)
             {
                 while (true)
                 {
@@ -2578,7 +2505,7 @@ LIB_API int main(int argc, char **argv)
                 return true;
             };
 
-            auto on_complete = [id_task, &ctx_server](bool)
+            auto on_complete = [id_task](bool)
             {
                 // cancel
                 ctx_server.request_cancel(id_task);
