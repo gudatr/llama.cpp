@@ -39,6 +39,13 @@ using json = nlohmann::ordered_json;
 bool server_verbose = false;
 bool server_log_json = true;
 
+bool initialized = false;
+
+LIB_API bool LLAMA_Initialized()
+{
+    return initialized;
+}
+
 enum stop_type
 {
     STOP_TYPE_FULL,
@@ -385,6 +392,7 @@ struct server_queue
         while (true)
         {
             loops += 1;
+            initialized = true;
             if (!callback_update_slots())
             {
                 std::this_thread::sleep_for(ms);
