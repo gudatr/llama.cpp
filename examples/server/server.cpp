@@ -78,7 +78,6 @@ enum server_task_type
 struct server_task
 {
     int id = -1; // to be filled by server_queue
-    int id_multi = -1;
     int id_target = -1;
 
     server_task_type type;
@@ -91,7 +90,6 @@ struct server_task
 struct server_task_result
 {
     int id = -1;
-    int id_multi = -1;
 
     json data;
 
@@ -100,14 +98,6 @@ struct server_task_result
 };
 
 int loops = 0;
-
-struct server_task_multi
-{
-    int id = -1;
-
-    std::set<int> subtasks_remaining;
-    std::vector<server_task_result> results;
-};
 
 struct slot_params
 {
@@ -128,7 +118,6 @@ struct server_slot
 {
     int id;
     int id_task = -1;
-    int id_multi = -1;
 
     struct slot_params params;
 
@@ -310,27 +299,6 @@ struct server_slot
 
         return stop_pos;
     }
-
-    void print_timings() const
-    {
-        char buffer[512];
-
-        double t_token = t_prompt_processing / n_prompt_tokens_processed;
-        double n_tokens_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
-
-        snprintf(buffer, 512, "prompt eval time     = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)",
-                 t_prompt_processing, n_prompt_tokens_processed,
-                 t_token, n_tokens_second);
-
-        t_token = t_token_generation / n_decoded;
-        n_tokens_second = 1e3 / t_token_generation * n_decoded;
-
-        snprintf(buffer, 512, "generation eval time = %10.2f ms / %5d runs   (%8.2f ms per token, %8.2f tokens per second)",
-                 t_token_generation, n_decoded,
-                 t_token, n_tokens_second);
-
-        snprintf(buffer, 512, "          total time = %10.2f ms", t_prompt_processing + t_token_generation);
-    }
 };
 
 struct server_queue
@@ -342,10 +310,7 @@ struct server_queue
     std::vector<server_task> queue_tasks;
     std::vector<server_task> queue_tasks_deferred;
 
-    std::vector<server_task_multi> queue_multitasks;
-
     std::mutex mutex_tasks;
-    std::condition_variable condition_tasks;
 
     // callback functions
     std::function<void(server_task &)> callback_new_task;
@@ -361,15 +326,7 @@ struct server_queue
             LOG_VERBOSE("new task id", {{"new_id", task.id}});
         }
         queue_tasks.push_back(std::move(task));
-        condition_tasks.notify_one();
         return task.id;
-    }
-
-    // Add a new task, but defer until one slot is available
-    void defer(server_task task)
-    {
-        std::unique_lock<std::mutex> lock(mutex_tasks);
-        queue_tasks_deferred.push_back(std::move(task));
     }
 
     // Get the next id for creating anew task
@@ -410,7 +367,6 @@ struct server_queue
     {
         std::unique_lock<std::mutex> lock(mutex_tasks);
         running = false;
-        condition_tasks.notify_all();
     }
 
     std::chrono::duration<long, std::ratio<1L, 1000L>> ms = std::chrono::milliseconds(20);
@@ -439,35 +395,11 @@ struct server_queue
 
 struct server_response
 {
-    typedef std::function<void(int, int, server_task_result &)> callback_multitask_t;
-    callback_multitask_t callback_update_multitask;
-
-    // for keeping track of all tasks waiting for the result
-    std::set<int> waiting_task_ids;
-
     // the main result queue
     std::vector<server_task_result> queue_results;
 
     std::mutex mutex_results;
     std::condition_variable condition_results;
-
-    // add the id_task to the list of tasks waiting for response
-    void add_waiting_task_id(int id_task)
-    {
-        LOG_VERBOSE("waiting for task id", {{"id_task", id_task}});
-
-        std::unique_lock<std::mutex> lock(mutex_results);
-        waiting_task_ids.insert(id_task);
-    }
-
-    // when the request is finished, we can remove task associated with it
-    void remove_waiting_task_id(int id_task)
-    {
-        LOG_VERBOSE("remove waiting for task id", {{"id_task", id_task}});
-
-        std::unique_lock<std::mutex> lock(mutex_results);
-        waiting_task_ids.erase(id_task);
-    }
 
     // This function blocks the thread until there is a response for this id_task
     server_task_result recv(int id_task)
@@ -482,7 +414,6 @@ struct server_response
             {
                 if (queue_results[i].id == id_task)
                 {
-                    assert(queue_results[i].id_multi == -1);
                     server_task_result res = queue_results[i];
                     queue_results.erase(queue_results.begin() + i);
                     return res;
@@ -491,39 +422,6 @@ struct server_response
         }
 
         // should never reach here
-    }
-
-    // Register the function to update multitask
-    void on_multitask_update(callback_multitask_t callback)
-    {
-        callback_update_multitask = std::move(callback);
-    }
-
-    // Send a new result to a waiting id_task
-    void send(server_task_result result)
-    {
-        LOG_VERBOSE("send new result", {{"id_task", result.id}});
-
-        std::unique_lock<std::mutex> lock(mutex_results);
-        for (const auto &id_task : waiting_task_ids)
-        {
-            // LOG_TEE("waiting task id %i \n", id_task);
-            // for now, tasks that have associated parent multitasks just get erased once multitask picks up the result
-            if (result.id_multi == id_task)
-            {
-                LOG_VERBOSE("callback_update_multitask", {{"id_task", id_task}});
-                callback_update_multitask(id_task, result.id, result);
-                continue;
-            }
-
-            if (result.id == id_task)
-            {
-                LOG_VERBOSE("queue_results.push_back", {{"id_task", id_task}});
-                queue_results.push_back(result);
-                condition_results.notify_all();
-                return;
-            }
-        }
     }
 };
 
@@ -542,7 +440,6 @@ struct server_context
 
     // slots / clients
     std::vector<server_slot> slots;
-    json default_generation_settings_for_props;
 
     server_queue queue_tasks;
     server_response queue_results;
@@ -606,9 +503,6 @@ struct server_context
 
             slots.push_back(slot);
         }
-
-        default_generation_settings_for_props = get_formated_generation(slots.front());
-        default_generation_settings_for_props["seed"] = -1;
 
         // the update_slots() logic will always submit a maximum of n_batch tokens
         // note that n_batch can be > n_ctx (e.g. for non-causal attention models such as BERT where the KV cache is not used)
@@ -1111,54 +1005,6 @@ struct server_context
                                   });
 
         return slot.has_next_token; // continue
-    }
-
-    json get_formated_generation(const server_slot &slot) const
-    {
-        const auto eos_bias = slot.sparams.logit_bias.find(llama_token_eos(model));
-        const bool ignore_eos = eos_bias != slot.sparams.logit_bias.end() && eos_bias->second < 0.0f && std::isinf(eos_bias->second);
-
-        std::vector<std::string> samplers_sequence;
-        samplers_sequence.reserve(slot.sparams.samplers_sequence.size());
-        for (const auto &sampler_type : slot.sparams.samplers_sequence)
-        {
-            samplers_sequence.emplace_back(llama_sampling_type_to_str(sampler_type));
-        }
-
-        return json{
-            {"n_ctx", slot.n_ctx},
-            {"n_predict", slot.n_predict},
-            {"model", params.model_alias},
-            {"seed", slot.sparams.seed},
-            {"temperature", slot.sparams.temp},
-            {"dynatemp_range", slot.sparams.dynatemp_range},
-            {"dynatemp_exponent", slot.sparams.dynatemp_exponent},
-            {"top_k", slot.sparams.top_k},
-            {"top_p", slot.sparams.top_p},
-            {"min_p", slot.sparams.min_p},
-            {"tfs_z", slot.sparams.tfs_z},
-            {"typical_p", slot.sparams.typical_p},
-            {"repeat_last_n", slot.sparams.penalty_last_n},
-            {"repeat_penalty", slot.sparams.penalty_repeat},
-            {"presence_penalty", slot.sparams.penalty_present},
-            {"frequency_penalty", slot.sparams.penalty_freq},
-            {"penalty_prompt_tokens", slot.sparams.penalty_prompt_tokens},
-            {"use_penalty_prompt_tokens", slot.sparams.use_penalty_prompt_tokens},
-            {"mirostat", slot.sparams.mirostat},
-            {"mirostat_tau", slot.sparams.mirostat_tau},
-            {"mirostat_eta", slot.sparams.mirostat_eta},
-            {"penalize_nl", slot.sparams.penalize_nl},
-            {"stop", slot.params.antiprompt},
-            {"n_predict", slot.params.n_predict}, // TODO: fix duplicate key n_predict
-            {"n_keep", slot.params.n_keep},
-            {"n_discard", slot.params.n_discard},
-            {"ignore_eos", ignore_eos},
-            {"stream", slot.params.stream},
-            {"logit_bias", slot.sparams.logit_bias},
-            {"n_probs", slot.sparams.n_probs},
-            {"min_keep", slot.sparams.min_keep},
-            {"grammar", slot.sparams.grammar},
-            {"samplers", samplers_sequence}};
     }
 
     void send_partial_response(completion_token_output tkn)
@@ -1745,7 +1591,6 @@ LIB_API bool LLAMA_Prompt(const char *text)
 
         server_task task;
         task.id = 0;
-        task.id_multi = 0;
         task.id_target = 0;
         task.data = std::move(data);
         task.infill = false;
@@ -1755,7 +1600,6 @@ LIB_API bool LLAMA_Prompt(const char *text)
         slot->reset();
 
         slot->id_task = task.id;
-        slot->id_multi = task.id_multi;
         slot->infill = task.infill;
         slot->embedding = task.embedding;
 
@@ -1819,17 +1663,6 @@ LIB_API int main(int argc, char **argv)
     else
     {
         ctx_server.init();
-    }
-
-    // print sample chat example to make it clear which template is used
-    {
-        json chat;
-        chat.push_back({{"role", "system"}, {"content", "You are a helpful assistant"}});
-        chat.push_back({{"role", "user"}, {"content", "Hello"}});
-        chat.push_back({{"role", "assistant"}, {"content", "Hi there"}});
-        chat.push_back({{"role", "user"}, {"content", "How are you?"}});
-
-        const std::string chat_example = format_chat(ctx_server.model, params.chat_template, chat);
     }
 
     ctx_server.queue_tasks.on_update_slots(std::bind(
