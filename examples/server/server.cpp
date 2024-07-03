@@ -444,6 +444,8 @@ struct server_context
 
     bool add_bos_token = true;
 
+    int64_t timing = 0;
+
     int32_t n_ctx; // total context for all clients / slots
 
     // slots / clients
@@ -615,6 +617,7 @@ struct server_context
         llama_sampling_params default_sparams;
         auto &data = task.data;
         tkns_start = tkns_pos;
+        timing = ggml_time_us();
         active = true;
 
         slot.params.stream = json_value(data, "stream", false);
@@ -1023,6 +1026,7 @@ struct server_context
 
     void send_final_response()
     {
+        timing = ggml_time_us() - timing;
         active = false;
     }
 
@@ -1584,6 +1588,11 @@ LIB_API void LLAMA_DiscardData(char *data)
 LIB_API bool LLAMA_IsActive()
 {
     return ctx_server.active || ctx_server.tkns_start != ctx_server.tkns_pos;
+}
+
+LIB_API int64_t LLAMA_LastTiming()
+{
+    return ctx_server.timing;
 }
 
 LIB_API bool LLAMA_Prompt(const char *text)
