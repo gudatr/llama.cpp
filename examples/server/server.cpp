@@ -336,21 +336,6 @@ struct server_queue
         return task.id;
     }
 
-    // Get the next id for creating anew task
-    int get_new_id()
-    {
-        std::unique_lock<std::mutex> lock(mutex_tasks);
-        int new_id = id++;
-        LOG_VERBOSE("new task id", {{"new_id", new_id}});
-        return new_id;
-    }
-
-    // Register function to process a new task
-    void on_new_task(std::function<void(server_task &)> callback)
-    {
-        callback_new_task = std::move(callback);
-    }
-
     // Register the function to be called when all slots data is ready to be processed
     void on_update_slots(std::function<bool(void)> callback)
     {

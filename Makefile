@@ -11,7 +11,6 @@ BUILD_TARGETS = \
 	llama-embedding \
 	llama-eval-callback \
 	llama-export-lora \
-	llama-finetune \
 	llama-gbnf-validator \
 	llama-gguf \
 	llama-gguf-hash \
@@ -37,7 +36,6 @@ BUILD_TARGETS = \
 	llama-simple \
 	llama-speculative \
 	llama-tokenize \
-	llama-train-text-from-scratch \
 	llama-vdot \
 	llama-cvector-generator \
 	tests/test-c.o
@@ -64,13 +62,13 @@ TEST_TARGETS = \
 	tests/test-tokenizer-1-spm
 
 # Legacy build targets that were renamed in #7809, but should still be removed when the project is cleaned
-LEGACY_TARGETS_CLEAN = main quantize quantize-stats perplexity imatrix embedding vdot q8dot train-text-from-scratch convert-llama2c-to-ggml \
+LEGACY_TARGETS_CLEAN = main quantize quantize-stats perplexity imatrix embedding vdot q8dot convert-llama2c-to-ggml \
 	simple batched batched-bench save-load-state server gguf gguf-split eval-callback llama-bench libllava.a llava-cli baby-llama \
-	retrieval speculative infill tokenize benchmark-matmult parallel finetune export-lora lookahead lookup passkey gritlm
+	retrieval speculative infill tokenize benchmark-matmult parallel export-lora lookahead lookup passkey gritlm
 
 # Legacy build targets that were renamed in #7809, but we want to build binaries that for them that output a deprecation warning if people try to use them.
 #  We don't want to clutter things too much, so we only build replacements for the most commonly used binaries.
-LEGACY_TARGETS_BUILD = main quantize perplexity embedding server finetune
+LEGACY_TARGETS_BUILD = main quantize perplexity embedding server
 
 # Deprecation aliases
 ifdef LLAMA_CUBLAS
@@ -195,6 +193,10 @@ endif
 
 ifdef GGML_RPC
 	BUILD_TARGETS += rpc-server
+endif
+
+ifdef GGML_VULKAN
+	BUILD_TARGETS += vulkan-shaders-gen
 endif
 
 default: $(BUILD_TARGETS) $(LEGACY_TARGETS_BUILD)
@@ -710,8 +712,8 @@ endif # GGML_CUDA
 
 ifdef GGML_VULKAN
 	MK_CPPFLAGS += -DGGML_USE_VULKAN
-	MK_LDFLAGS  += -lvulkan
-	OBJ_GGML    += ggml/src/ggml-vulkan.o
+	MK_LDFLAGS  += $(shell pkg-config --libs vulkan)
+	OBJ_GGML    += ggml/src/ggml-vulkan.o ggml/src/ggml-vulkan-shaders.o
 
 ifdef GGML_VULKAN_CHECK_RESULTS
 	MK_CPPFLAGS  += -DGGML_VULKAN_CHECK_RESULTS
@@ -733,10 +735,28 @@ ifdef GGML_VULKAN_RUN_TESTS
 	MK_CPPFLAGS  += -DGGML_VULKAN_RUN_TESTS
 endif
 
-ggml/src/ggml-vulkan.o: \
-	ggml/src/ggml-vulkan.cpp \
-	ggml/include/ggml-vulkan.h
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+GLSLC_CMD  = glslc
+_ggml_vk_genshaders_cmd = $(shell pwd)/vulkan-shaders-gen
+_ggml_vk_header = ggml/src/ggml-vulkan-shaders.hpp
+_ggml_vk_source = ggml/src/ggml-vulkan-shaders.cpp
+_ggml_vk_input_dir = ggml/src/vulkan-shaders
+_ggml_vk_shader_deps = $(echo $(_ggml_vk_input_dir)/*.comp)
+
+ggml/src/ggml-vulkan.o: ggml/src/ggml-vulkan.cpp ggml/include/ggml-vulkan.h $(_ggml_vk_header) $(_ggml_vk_source)
+	$(CXX) $(CXXFLAGS) $(shell pkg-config --cflags vulkan) -c $< -o $@
+
+$(_ggml_vk_header): $(_ggml_vk_source)
+
+$(_ggml_vk_source): $(_ggml_vk_shader_deps) vulkan-shaders-gen
+	$(_ggml_vk_genshaders_cmd) \
+		--glslc      $(GLSLC_CMD) \
+		--input-dir  $(_ggml_vk_input_dir) \
+		--target-hpp $(_ggml_vk_header) \
+		--target-cpp $(_ggml_vk_source)
+
+vulkan-shaders-gen: ggml/src/vulkan-shaders/vulkan-shaders-gen.cpp
+	$(CXX) $(CXXFLAGS) -o $@ $(LDFLAGS) ggml/src/vulkan-shaders/vulkan-shaders-gen.cpp
+
 endif # GGML_VULKAN
 
 ifdef GGML_HIPBLAS
@@ -772,6 +792,14 @@ endif # GGML_HIP_UMA
 ifdef GGML_CUDA_FORCE_DMMV
 	HIPFLAGS += -DGGML_CUDA_FORCE_DMMV
 endif # GGML_CUDA_FORCE_DMMV
+
+ifdef GGML_CUDA_FORCE_MMQ
+	HIPFLAGS += -DGGML_CUDA_FORCE_MMQ
+endif # GGML_CUDA_FORCE_MMQ
+
+ifdef GGML_CUDA_FORCE_CUBLAS
+	HIPFLAGS += -DGGML_CUDA_FORCE_CUBLAS
+endif # GGML_CUDA_FORCE_CUBLAS
 
 ifdef GGML_CUDA_NO_PEER_COPY
 	HIPFLAGS += -DGGML_CUDA_NO_PEER_COPY
@@ -846,6 +874,9 @@ OBJ_GGML += \
 
 OBJ_LLAMA = \
 	src/llama.o \
+	src/llama-vocab.o \
+	src/llama-grammar.o \
+	src/llama-sampling.o \
 	src/unicode.o \
 	src/unicode-data.o
 
@@ -1025,6 +1056,10 @@ src/unicode-data.o: \
 
 src/llama.o: \
 	src/llama.cpp \
+	src/llama-impl.h \
+	src/llama-vocab.h \
+	src/llama-grammar.h \
+	src/llama-sampling.h \
 	src/unicode.h \
 	include/llama.h \
 	ggml/include/ggml-cuda.h \
@@ -1032,6 +1067,29 @@ src/llama.o: \
 	ggml/include/ggml.h \
 	ggml/include/ggml-alloc.h \
 	ggml/include/ggml-backend.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+src/llama-vocab.o: \
+	src/llama-vocab.cpp \
+	src/llama-vocab.h \
+	src/llama-impl.h \
+	include/llama.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+src/llama-grammar.o: \
+	src/llama-grammar.cpp \
+	src/llama-grammar.h \
+	src/llama-impl.h \
+	src/llama-vocab.h \
+	src/llama-sampling.h \
+	include/llama.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+src/llama-sampling.o: \
+	src/llama-sampling.cpp \
+	src/llama-sampling.h \
+	src/llama-impl.h \
+	include/llama.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(LIB_LLAMA): \
@@ -1116,6 +1174,7 @@ clean:
 	rm -vrf ggml/src/ggml-cuda/template-instances/*.o
 	rm -rvf $(BUILD_TARGETS)
 	rm -rvf $(TEST_TARGETS)
+	rm -f vulkan-shaders-gen ggml/src/ggml-vulkan-shaders.hpp ggml/src/ggml-vulkan-shaders.cpp
 	rm -rvf $(LEGACY_TARGETS_CLEAN)
 	find examples pocs -type f -name "*.o" -delete
 
@@ -1235,11 +1294,6 @@ llama-cvector-generator: examples/cvector-generator/cvector-generator.cpp \
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
-llama-train-text-from-scratch: examples/train-text-from-scratch/train-text-from-scratch.cpp \
-	$(OBJ_ALL)
-	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
-
 llama-convert-llama2c-to-ggml: examples/convert-llama2c-to-ggml/convert-llama2c-to-ggml.cpp \
 	$(OBJ_GGML) $(OBJ_LLAMA)
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
@@ -1255,13 +1309,8 @@ llama-baby-llama: examples/baby-llama/baby-llama.cpp \
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
-llama-finetune: examples/finetune/finetune.cpp \
-	$(OBJ_ALL)
-	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
-
 llama-export-lora: examples/export-lora/export-lora.cpp \
-	$(OBJ_GGML) common/log.h
+	$(OBJ_ALL)
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
@@ -1408,7 +1457,7 @@ run-benchmark-matmult: llama-benchmark-matmult
 .PHONY: run-benchmark-matmult swift
 
 tests/test-llama-grammar: tests/test-llama-grammar.cpp \
-	$(OBJ_GGML) $(OBJ_COMMON) src/unicode.o src/unicode-data.o
+	$(OBJ_ALL)
 	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
@@ -1517,7 +1566,7 @@ llama-q8dot: pocs/vdot/q8dot.cpp ggml/src/ggml.o \
 # Deprecated binaries that we want to keep around long enough for people to migrate to the new filenames, then these can be removed.
 #
 # Mark legacy binary targets as .PHONY so that they are always checked.
-.PHONY: main quantize perplexity embedding server finetune
+.PHONY: main quantize perplexity embedding server
 
 # NOTE: We currently will always build the deprecation-warning `main` and `server` binaries to help users migrate.
 #  Eventually we will want to remove these target from building all the time.
@@ -1558,15 +1607,5 @@ ifneq (,$(wildcard embedding))
 	@echo "#########"
 	@echo "WARNING: The 'embedding' binary is deprecated. Please use 'llama-embedding' instead."
 	@echo "  Remove the 'embedding' binary to remove this warning."
-	@echo "#########"
-endif
-
-finetune: examples/deprecation-warning/deprecation-warning.cpp
-ifneq (,$(wildcard finetune))
-	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
-	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
-	@echo "#########"
-	@echo "WARNING: The 'finetune' binary is deprecated. Please use 'llama-finetune' instead."
-	@echo "  Remove the 'finetune' binary to remove this warning."
 	@echo "#########"
 endif
