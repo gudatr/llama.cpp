@@ -374,7 +374,7 @@ struct server_queue
     {
         running = true;
 
-        while (true)
+        while (running)
         {
             loops += 1;
             initialized = true;
@@ -1541,6 +1541,11 @@ server_context ctx_server;
 LIB_API int LLAMA_CheckLoops()
 {
     return loops;
+}
+
+LIB_API int LLAMA_Terminate()
+{
+    return ctx_server.queue_tasks.running = false;
 }
 
 LIB_API char *LLAMA_GetData(uint32_t &dataSize)
